@@ -1,0 +1,718 @@
+-- Databricks notebook source
+-- MAGIC %md
+-- MAGIC ![Databricks Academy](../Includes/images/db-academy.png)
+
+-- COMMAND ----------
+
+-- DBTITLE 1,Cell 2
+-- MAGIC %md
+-- MAGIC # Lecture - PostgreSQL Overview
+-- MAGIC
+-- MAGIC Even though Databricks provides mechanisms to integrate Lakebase with Unity Catalog through catalog federation [[AWS](https://docs.databricks.com/aws/en/oltp/projects/register-uc/) | [Azure](https://learn.microsoft.com/en-us/azure/databricks/oltp/projects/register-uc) | [GCP](https://docs.databricks.com/gcp/en/oltp/projects/register-uc/)] and synced tables [[AWS](https://docs.databricks.com/aws/en/oltp/projects/sync-tables/) | [Azure](https://learn.microsoft.com/en-us/azure/databricks/oltp/projects/sync-tables) | [GCP](https://docs.databricks.com/gcp/en/oltp/projects/sync-tables/)], building a Lakebase app means interacting directly with Lakebase (which means PostgreSQL).
+-- MAGIC
+-- MAGIC In this lesson, we'll explore the mechanics of Postgres in just enough depth, so you can build effective apps and safely solve basic problems like:
+-- MAGIC - How can my app create a schema?
+-- MAGIC - Where is my table?
+-- MAGIC - Why can't my app access tables in the **public** schema?
+-- MAGIC - How do I grant access to all the tables to *X*?
+-- MAGIC - What privileges does one need to write to a table?
+-- MAGIC
+-- MAGIC For anything more advanced, please refer to the [Postgres documentation](https://www.postgresql.org/docs/) (choose the version that matches your deployment).
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC
+-- MAGIC ## Learning Objectives
+-- MAGIC
+-- MAGIC By the end of this lesson, you will be able to:
+-- MAGIC
+-- MAGIC - **Describe the core Postgres object model** — including roles, databases, schemas, and schema objects — and explain how each maps to (or differs from) Unity Catalog concepts.
+-- MAGIC - **Explain how Postgres resolves unqualified object references** using the search path, and identify when fully-qualified names should be used to avoid ambiguity.
+-- MAGIC - **Identify the privileges required at each level of the Postgres hierarchy** — database, schema, table/view, and function — for a given application access pattern.
+-- MAGIC - **Determine the minimum set of privileges** a Lakebase application role needs based on whether it creates its own schema, operates in an existing schema, or accesses pre-existing tables.
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## A. Key Concepts
+-- MAGIC
+-- MAGIC In this section, we clarify some foundational terminology, in most cases highlighting similarities and differences between Postgres and Unity Catalog.
+
+-- COMMAND ----------
+
+-- DBTITLE 1,Cell 5
+-- MAGIC %md-sandbox
+-- MAGIC ### A1. Roles
+-- MAGIC
+-- MAGIC A **role** is the fundamental unit of identity in Postgres. In Unity Catalog, we have users, service principals and groups; in Postgres, we have roles. It’s a unified concept covering both users and groups.
+-- MAGIC
+-- MAGIC Every action in the database is performed as a role. This could include anything from connecting to the database, to creating schemas or reading tables.
+-- MAGIC
+-- MAGIC A role can own objects:
+-- MAGIC - By default, an object is owned by the role that created it
+-- MAGIC - Ownership implicitly provides all permissions that the object supports, as well as the ability to manage that object; that is:
+-- MAGIC    - Altering or dropping the object
+-- MAGIC    - Granting privileges on the object to others
+-- MAGIC    - Changing ownership of the object
+-- MAGIC
+-- MAGIC Privileges can be granted to roles. Roles can also inherit permissions from other roles, and even contain nested roles to model teams. Since everything flows through roles, understanding them is key to controlling who can access what.
+-- MAGIC
+-- MAGIC <div style="display:block; margin:18px auto; max-width:420px; width:100%; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; color:#1B3139;">
+-- MAGIC   <svg viewBox="0 0 420 260" width="100%" style="display:block;">
+-- MAGIC     <defs>
+-- MAGIC       <marker id="arrow-role-db" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+-- MAGIC         <path d="M0,0 L0,6 L8,3 z" fill="#5B6B73"></path>
+-- MAGIC       </marker>
+-- MAGIC       <filter id="role-shadow" x="-20%" y="-20%" width="140%" height="140%">
+-- MAGIC         <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1B3139" flood-opacity="0.08"></feDropShadow>
+-- MAGIC       </filter>
+-- MAGIC     </defs>
+-- MAGIC     <!-- Role -->
+-- MAGIC     <rect x="36" y="92" width="70" height="44" rx="22"
+-- MAGIC           fill="#FF3621" stroke="#98102A" stroke-width="2" filter="url(#role-shadow)"></rect>
+-- MAGIC     <text x="71" y="119" text-anchor="middle" font-size="15" font-weight="800" fill="#FFFFFF">Role</text>
+-- MAGIC     <!-- Database container -->
+-- MAGIC     <rect x="235" y="25" width="120" height="210" rx="8"
+-- MAGIC           fill="#F9F7F4" stroke="#1B3139" stroke-width="1.8" filter="url(#role-shadow)"></rect>
+-- MAGIC     <text x="295" y="52" text-anchor="middle" font-size="16" font-weight="800" fill="#1B3139">Database</text>
+-- MAGIC     <!-- Table 1 -->
+-- MAGIC     <rect x="264" y="78" width="62" height="50" rx="4"
+-- MAGIC           fill="#FFB000" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC     <line x1="264" y1="88" x2="326" y2="88" stroke="#1B3139" stroke-width="1.8"></line>
+-- MAGIC     <text x="295" y="110" text-anchor="middle" font-size="15" font-weight="700" fill="#1B3139">Table</text>
+-- MAGIC     <!-- Table 2 -->
+-- MAGIC     <rect x="264" y="168" width="62" height="50" rx="4"
+-- MAGIC           fill="#FFB000" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC     <line x1="264" y1="178" x2="326" y2="178" stroke="#1B3139" stroke-width="1.8"></line>
+-- MAGIC     <text x="295" y="200" text-anchor="middle" font-size="15" font-weight="700" fill="#1B3139">Table</text>
+-- MAGIC     <!-- Ownership arrow -->
+-- MAGIC     <path d="M106 104 C145 78, 190 58, 264 101"
+-- MAGIC           fill="none" stroke="#5B6B73" stroke-width="2.1" marker-end="url(#arrow-role-db)"></path>
+-- MAGIC     <rect x="143" y="54" width="86" height="28" rx="6" fill="#EEEDE9"></rect>
+-- MAGIC     <text x="186" y="73" text-anchor="middle" font-size="15" fill="#1B3139">ownership</text>
+-- MAGIC     <!-- Connect arrow -->
+-- MAGIC     <line x1="106" y1="114" x2="235" y2="114"
+-- MAGIC           stroke="#5B6B73" stroke-width="2.1" marker-end="url(#arrow-role-db)"></line>
+-- MAGIC     <rect x="137" y="100" width="78" height="28" rx="6" fill="#EEEDE9"></rect>
+-- MAGIC     <text x="176" y="119" text-anchor="middle" font-size="15" fill="#1B3139">connect</text>
+-- MAGIC     <!-- Grant arrow -->
+-- MAGIC     <path d="M106 124 C145 158, 190 190, 264 193"
+-- MAGIC           fill="none" stroke="#5B6B73" stroke-width="2.1" marker-end="url(#arrow-role-db)"></path>
+-- MAGIC     <rect x="147" y="148" width="62" height="28" rx="6" fill="#EEEDE9"></rect>
+-- MAGIC     <text x="178" y="167" text-anchor="middle" font-size="15" fill="#1B3139">grant</text>
+-- MAGIC   </svg>
+-- MAGIC </div>
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ### A2. Database
+-- MAGIC
+-- MAGIC A **database** is a top-level container for all data objects. It provides an isolated namespace and connection boundary. When accessing Lakebase, clients select a specific database. Objects in different databases are not accessible within that connection.
+-- MAGIC
+-- MAGIC `databricks_postgres` is a default database, automatically created with all Lakebase projects. This helps users get started quickly without a need to create and configure additional databases.
+
+-- COMMAND ----------
+
+-- DBTITLE 1,Cell 7
+-- MAGIC %md-sandbox
+-- MAGIC ### A3. Schema
+-- MAGIC
+-- MAGIC **Schemas** in Postgres perform a similar function to those in Unity Catalog: they organize data objects into logical containers. Each schema represents a namespace that groups related tables, views and functions.
+-- MAGIC
+-- MAGIC <div style="display:block; margin:18px auto; max-width:620px; width:100%; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; color:#1B3139;">
+-- MAGIC   <svg viewBox="0 0 620 360" width="100%" style="display:block;">
+-- MAGIC     <defs>
+-- MAGIC       <marker id="schema-arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+-- MAGIC         <path d="M0,0 L0,6 L8,3 z" fill="#5B6B73"></path>
+-- MAGIC       </marker>
+-- MAGIC       <filter id="schema-shadow" x="-20%" y="-20%" width="140%" height="140%">
+-- MAGIC         <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1B3139" flood-opacity="0.08"></feDropShadow>
+-- MAGIC       </filter>
+-- MAGIC     </defs>
+-- MAGIC     <!-- Database container -->
+-- MAGIC     <rect x="40" y="28" width="540" height="292" rx="14"
+-- MAGIC           fill="#F9F7F4" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC     <text x="310" y="58"
+-- MAGIC           text-anchor="middle"
+-- MAGIC           font-size="17"
+-- MAGIC           font-weight="800"
+-- MAGIC           fill="#1B3139">Database</text>
+-- MAGIC     <!-- Schema -->
+-- MAGIC     <rect x="220" y="86" width="180" height="66" rx="12"
+-- MAGIC           fill="#FF3621" stroke="#98102A" stroke-width="1.8" filter="url(#schema-shadow)"></rect>
+-- MAGIC     <text x="310" y="126"
+-- MAGIC           text-anchor="middle"
+-- MAGIC           font-size="17"
+-- MAGIC           font-weight="800"
+-- MAGIC           fill="#FFFFFF">Schema</text>
+-- MAGIC     <!-- Child blocks, equal size + balanced -->
+-- MAGIC     <rect x="90" y="232" width="120" height="64" rx="10"
+-- MAGIC           fill="#FFFFFF" stroke="#1B3139" stroke-width="1.8" filter="url(#schema-shadow)"></rect>
+-- MAGIC     <text x="150" y="270"
+-- MAGIC           text-anchor="middle"
+-- MAGIC           font-size="16"
+-- MAGIC           font-weight="700"
+-- MAGIC           fill="#1B3139">Tables</text>
+-- MAGIC     <rect x="250" y="232" width="120" height="64" rx="10"
+-- MAGIC           fill="#FFFFFF" stroke="#1B3139" stroke-width="1.8" filter="url(#schema-shadow)"></rect>
+-- MAGIC     <text x="310" y="270"
+-- MAGIC           text-anchor="middle"
+-- MAGIC           font-size="16"
+-- MAGIC           font-weight="700"
+-- MAGIC           fill="#1B3139">Views</text>
+-- MAGIC     <rect x="410" y="232" width="120" height="64" rx="10"
+-- MAGIC           fill="#FFFFFF" stroke="#1B3139" stroke-width="1.8" filter="url(#schema-shadow)"></rect>
+-- MAGIC     <text x="470" y="270"
+-- MAGIC           text-anchor="middle"
+-- MAGIC           font-size="16"
+-- MAGIC           font-weight="700"
+-- MAGIC           fill="#1B3139">Functions</text>
+-- MAGIC     <!-- Connectors -->
+-- MAGIC     <path d="M260 152 C210 176, 160 190, 150 232"
+-- MAGIC           fill="none"
+-- MAGIC           stroke="#5B6B73"
+-- MAGIC           stroke-width="2.2"
+-- MAGIC           marker-end="url(#schema-arrow)"></path>
+-- MAGIC     <line x1="310" y1="152" x2="310" y2="232"
+-- MAGIC           stroke="#5B6B73"
+-- MAGIC           stroke-width="2.2"
+-- MAGIC           marker-end="url(#schema-arrow)"></line>
+-- MAGIC     <path d="M360 152 C410 176, 460 190, 470 232"
+-- MAGIC           fill="none"
+-- MAGIC           stroke="#5B6B73"
+-- MAGIC           stroke-width="2.2"
+-- MAGIC           marker-end="url(#schema-arrow)"></path>
+-- MAGIC   </svg>
+-- MAGIC </div>
+-- MAGIC
+-- MAGIC Examples include:
+-- MAGIC - `information_schema`: a system schema containing views that expose information about the objects defined in the current database
+-- MAGIC - `pg_catalog`: the system catalog is a collection of tables that store schema metadata; that is, information about tables, columns, and other internal bookkeeping information. 
+-- MAGIC - `pg_temp`: this system schema houses temporary tables and views.
+-- MAGIC - `public`: this default user schema is automatically created with each database.
+-- MAGIC
+-- MAGIC <div style="
+-- MAGIC   border-left: 4px solid #1976d2;
+-- MAGIC   background: #e3f2fd;
+-- MAGIC   padding: 14px 18px;
+-- MAGIC   border-radius: 8px;
+-- MAGIC   margin: 16px 0;
+-- MAGIC ">
+-- MAGIC   <strong style="display:block; color:#0d47a1; margin-bottom:6px; font-size: 1.1em;">
+-- MAGIC     Note
+-- MAGIC   </strong>
+-- MAGIC   <div style="color:#333;">
+-- MAGIC   Many tools (including the Databricks UI) will typically only display user schemas and filter out system schemas like <code>information_schema</code> and any schemas beginning with <code>pg_</code>.
+-- MAGIC   </div>
+-- MAGIC </div>
+
+-- COMMAND ----------
+
+-- MAGIC %md-sandbox
+-- MAGIC ### A4. Schema Objects
+-- MAGIC
+-- MAGIC Within a schema, we have the core objects you’re likely already familiar with:
+-- MAGIC
+-- MAGIC - **Tables** are structures that hold your actual data
+-- MAGIC - **Views** provide reusable query logic and can simplify or secure access to underlying tables
+-- MAGIC - **Functions** encapsulate SQL or procedural logic for reuse
+-- MAGIC
+-- MAGIC <div style="display:block; margin:18px auto; max-width:620px; width:100%; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; color:#1B3139;">
+-- MAGIC   <svg viewBox="0 0 620 360" width="100%" style="display:block;">
+-- MAGIC     <defs>
+-- MAGIC       <marker id="schema-arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+-- MAGIC         <path d="M0,0 L0,6 L8,3 z" fill="#5B6B73"></path>
+-- MAGIC       </marker>
+-- MAGIC       <filter id="schema-shadow" x="-20%" y="-20%" width="140%" height="140%">
+-- MAGIC         <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1B3139" flood-opacity="0.08"></feDropShadow>
+-- MAGIC       </filter>
+-- MAGIC     </defs>
+-- MAGIC     <!-- Database container -->
+-- MAGIC     <rect x="40" y="28" width="540" height="292" rx="14"
+-- MAGIC           fill="#F9F7F4" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC     <text x="310" y="58"
+-- MAGIC           text-anchor="middle"
+-- MAGIC           font-size="17"
+-- MAGIC           font-weight="800"
+-- MAGIC           fill="#1B3139">Database</text>
+-- MAGIC     <!-- Schema -->
+-- MAGIC     <rect x="220" y="86" width="180" height="66" rx="12"
+-- MAGIC         fill="#FFFFFF"
+-- MAGIC         stroke="#1B3139"
+-- MAGIC         stroke-width="1.8"
+-- MAGIC         filter="url(#schema-shadow)"></rect>
+-- MAGIC     <text x="310" y="126"
+-- MAGIC         text-anchor="middle"
+-- MAGIC         font-size="17"
+-- MAGIC         font-weight="800"
+-- MAGIC         fill="#1B3139">Schema</text>
+-- MAGIC     <!-- Tables -->
+-- MAGIC     <rect x="90" y="232" width="120" height="64" rx="10"
+-- MAGIC         fill="#FF3621"
+-- MAGIC         stroke="#98102A"
+-- MAGIC         stroke-width="1.8"
+-- MAGIC         filter="url(#schema-shadow)"></rect>
+-- MAGIC     <text x="150" y="270"
+-- MAGIC         text-anchor="middle"
+-- MAGIC         font-size="16"
+-- MAGIC         font-weight="700"
+-- MAGIC         fill="#FFFFFF">Tables</text>
+-- MAGIC     <!-- Views -->
+-- MAGIC     <rect x="250" y="232" width="120" height="64" rx="10"
+-- MAGIC         fill="#FF3621"
+-- MAGIC         stroke="#98102A"
+-- MAGIC         stroke-width="1.8"
+-- MAGIC         filter="url(#schema-shadow)"></rect>
+-- MAGIC     <text x="310" y="270"
+-- MAGIC         text-anchor="middle"
+-- MAGIC         font-size="16"
+-- MAGIC         font-weight="700"
+-- MAGIC         fill="#FFFFFF">Views</text>
+-- MAGIC     <!-- Functions -->
+-- MAGIC     <rect x="410" y="232" width="120" height="64" rx="10"
+-- MAGIC         fill="#FF3621"
+-- MAGIC         stroke="#98102A"
+-- MAGIC         stroke-width="1.8"
+-- MAGIC         filter="url(#schema-shadow)"></rect>
+-- MAGIC     <text x="470" y="270"
+-- MAGIC         text-anchor="middle"
+-- MAGIC         font-size="16"
+-- MAGIC         font-weight="700"
+-- MAGIC         fill="#FFFFFF">Functions</text>
+-- MAGIC     <!-- Connectors -->
+-- MAGIC     <path d="M260 152 C210 176, 160 190, 150 232"
+-- MAGIC           fill="none"
+-- MAGIC           stroke="#5B6B73"
+-- MAGIC           stroke-width="2.2"
+-- MAGIC           marker-end="url(#schema-arrow)"></path>
+-- MAGIC     <line x1="310" y1="152" x2="310" y2="232"
+-- MAGIC           stroke="#5B6B73"
+-- MAGIC           stroke-width="2.2"
+-- MAGIC           marker-end="url(#schema-arrow)"></line>
+-- MAGIC     <path d="M360 152 C410 176, 460 190, 470 232"
+-- MAGIC           fill="none"
+-- MAGIC           stroke="#5B6B73"
+-- MAGIC           stroke-width="2.2"
+-- MAGIC           marker-end="url(#schema-arrow)"></path>
+-- MAGIC   </svg>
+-- MAGIC </div>
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## B. Object References
+-- MAGIC
+-- MAGIC Let's take a few moments to talk about how we reference objects in PostgreSQL, as it compares to Unity Catalog.
+-- MAGIC
+
+-- COMMAND ----------
+
+-- DBTITLE 1,Cell 10
+-- MAGIC %md
+-- MAGIC ### B1. Fully Qualified References
+-- MAGIC
+-- MAGIC Postgres uses a two-level namespace to fully qualify object references; this includes the schema name and the object itself. There is no third level like there is in Unity Catalog.
+-- MAGIC
+-- MAGIC When it comes to handling unqualified references (that is, references that do not explicitly include a schema), Postgres resolution is different from Unity Catalog.
+
+-- COMMAND ----------
+
+-- DBTITLE 1,Cell 11
+-- MAGIC %md-sandbox
+-- MAGIC ### B2. Unqualified References
+-- MAGIC There is no `USE SCHEMA` statement to select a default schema like there is in Unity Catalog. Instead, Postgres has a [**search path**](https://www.postgresql.org/docs/current/ddl-schemas.html#DDL-SCHEMAS-PATH), consisting of an ordered list of schemas to search. Postgres uses the search path to look up objects, which is handy for many use cases, but can also create ambiguities if used incorrectly. This underscores the importance of using fully-qualified names when you want to eliminate any ambiguity.
+-- MAGIC
+-- MAGIC Referring to the diagram below, let’s consider the following scenario where we have a search path that includes two schemas: `public` and `app`:
+-- MAGIC - In the example query on the left, we make an unqualified reference to the table `orders`. Postgres looks in `public`, since that schema is listed first in the search path. Failing to find it there, it will look in `app`, where it will be found.
+-- MAGIC -  In the example query on the right, we reference the table `items`, which exists in both schemas. Since `public` is listed first in the search path, that version will be resolved.
+-- MAGIC
+-- MAGIC <div style="display:flex; justify-content:center; margin:18px 0;">
+-- MAGIC   <div style="max-width:720px; width:100%;">
+-- MAGIC     <svg viewBox="0 0 720 300" width="100%" style="display:block;">
+-- MAGIC       <defs>
+-- MAGIC         <marker id="arrow-schema" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto">
+-- MAGIC           <path d="M0,0 L0,6 L8,3 z" fill="#5B6B73"></path>
+-- MAGIC         </marker>
+-- MAGIC       </defs>
+-- MAGIC       <!-- Query boxes -->
+-- MAGIC       <rect x="80" y="20" width="240" height="54" rx="0"
+-- MAGIC             fill="#FFFFFF" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC       <text x="200" y="53" text-anchor="middle"
+-- MAGIC             font-size="14"
+-- MAGIC             font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+-- MAGIC             fill="#1B3139">SELECT * FROM orders</text>
+-- MAGIC       <rect x="400" y="20" width="240" height="54" rx="0"
+-- MAGIC             fill="#FFFFFF" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC       <text x="520" y="53" text-anchor="middle"
+-- MAGIC             font-size="14"
+-- MAGIC             font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+-- MAGIC             fill="#1B3139">SELECT * FROM items</text>
+-- MAGIC       <!-- Schema boxes -->
+-- MAGIC       <rect x="25" y="150" width="280" height="110" rx="0"
+-- MAGIC             fill="#FFFFFF" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC       <text x="175" y="170" text-anchor="middle"
+-- MAGIC             font-size="16"
+-- MAGIC             fill="#1B3139">app</text>
+-- MAGIC       <rect x="335" y="150" width="280" height="110" rx="0"
+-- MAGIC             fill="#FFFFFF" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC       <text x="475" y="170" text-anchor="middle"
+-- MAGIC             font-size="16"
+-- MAGIC             fill="#1B3139">public</text>
+-- MAGIC       <!-- Tables: app_schema -->
+-- MAGIC       <rect x="60" y="178" width="60" height="52" rx="0"
+-- MAGIC             fill="#FFB000" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC       <line x1="60" y1="186" x2="120" y2="186" stroke="#1B3139" stroke-width="1.8"></line>
+-- MAGIC       <text x="90" y="213" text-anchor="middle" font-size="16" fill="#000000">items</text>
+-- MAGIC       <rect x="180" y="178" width="70" height="52" rx="0"
+-- MAGIC             fill="#FFB000" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC       <line x1="180" y1="186" x2="250" y2="186" stroke="#1B3139" stroke-width="1.8"></line>
+-- MAGIC       <text x="215" y="213" text-anchor="middle" font-size="16" fill="#000000">orders</text>
+-- MAGIC       <!-- Tables: public -->
+-- MAGIC       <rect x="370" y="178" width="95" height="52" rx="0"
+-- MAGIC             fill="#FFB000" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC       <line x1="370" y1="186" x2="465" y2="186" stroke="#1B3139" stroke-width="1.8"></line>
+-- MAGIC       <text x="417.5" y="213" text-anchor="middle" font-size="16" fill="#000000">customers</text>
+-- MAGIC       <rect x="505" y="178" width="60" height="52" rx="0"
+-- MAGIC             fill="#FFB000" stroke="#1B3139" stroke-width="1.8"></rect>
+-- MAGIC       <line x1="505" y1="186" x2="565" y2="186" stroke="#1B3139" stroke-width="1.8"></line>
+-- MAGIC       <text x="535" y="213" text-anchor="middle" font-size="16" fill="#000000">items</text>
+-- MAGIC       <!-- Lookup arrows -->
+-- MAGIC       <line x1="200" y1="75" x2="200" y2="178"
+-- MAGIC             stroke="#5B6B73"
+-- MAGIC             stroke-width="1.6"
+-- MAGIC             stroke-dasharray="3 3"
+-- MAGIC             marker-end="url(#arrow-schema)"></line>
+-- MAGIC       <rect x="176" y="102" width="48" height="26" rx="2"
+-- MAGIC             fill="#EEEDE9"></rect>
+-- MAGIC       <text x="200" y="121" text-anchor="middle" font-size="15" fill="#1B3139">lookup</text>
+-- MAGIC       <line x1="520" y1="75" x2="520" y2="178"
+-- MAGIC             stroke="#5B6B73"
+-- MAGIC             stroke-width="1.6"
+-- MAGIC             stroke-dasharray="3 3"
+-- MAGIC             marker-end="url(#arrow-schema)"></line>
+-- MAGIC       <rect x="496" y="102" width="48" height="26" rx="2"
+-- MAGIC             fill="#EEEDE9"></rect>
+-- MAGIC       <text x="520" y="121" text-anchor="middle" font-size="15" fill="#1B3139">lookup</text>
+-- MAGIC     </svg>
+-- MAGIC   </div>
+-- MAGIC </div>
+-- MAGIC
+-- MAGIC Like a lot of Postgres, this behavior was modeled around how UNIX operating systems function, and was introduced as a measure to promote backwards compatibility with older versions of SQL that did not have schemas.
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## C. Privileges
+-- MAGIC
+-- MAGIC Postgres implements an ACL-based security model similar to Unity Catalog, although the privilege set and mechanisms are different. Let’s take a quick run through the privileges that matter most as a Databricks app developer, starting at the top and working down.
+
+-- COMMAND ----------
+
+-- MAGIC %md-sandbox
+-- MAGIC ### C1. Databases
+-- MAGIC
+-- MAGIC Databases have two privileges that can be applied.
+-- MAGIC
+-- MAGIC <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:20px;margin:20px 0;">
+-- MAGIC   <div style="background:#F9F7F4;border:1px solid #DCE0E2;border-radius:16px;box-shadow:0 2px 8px rgba(27,49,57,0.06);overflow:hidden;">
+-- MAGIC     <div style="height:8px;background:#FF5F46;"></div>
+-- MAGIC     <div style="padding:20px 22px;">
+-- MAGIC       <div style="font-size:24px;font-weight:700;line-height:1.2;color:#1B3139;margin-bottom:14px;">CONNECT</div>
+-- MAGIC       <div style="font-size:15px;line-height:1.6;color:#303F47;margin-bottom:14px;">
+-- MAGIC       Allows the grantee to enter the database – it’s the absolute minimum requirement for a role to initiate a connection and perform any operations within the database.
+-- MAGIC       </div>
+-- MAGIC     </div>
+-- MAGIC   </div>
+-- MAGIC   <div style="background:#F9F7F4;border:1px solid #DCE0E2;border-radius:16px;box-shadow:0 2px 8px rgba(27,49,57,0.06);overflow:hidden;">
+-- MAGIC     <div style="height:8px;background:#2272B4;"></div>
+-- MAGIC     <div style="padding:20px 22px;">
+-- MAGIC       <div style="font-size:24px;font-weight:700;line-height:1.2;color:#1B3139;margin-bottom:14px;">CREATE</div>
+-- MAGIC       <div style="font-size:15px;line-height:1.6;color:#303F47;margin-bottom:14px;">
+-- MAGIC         Allows the grantee to create schemas within the database. If your app creates and initializes its own schema(s), then this permission is required.
+-- MAGIC       </div>
+-- MAGIC     </div>
+-- MAGIC   </div>
+-- MAGIC </div>
+
+-- COMMAND ----------
+
+-- MAGIC %md-sandbox
+-- MAGIC ### C2. Schemas
+-- MAGIC
+-- MAGIC At the schema level, we have two privileges. Note that Postgres does not support privilege inheritance like Unity Catalog, so we cannot apply child privileges (like `SELECT`) at the schema level.
+-- MAGIC
+-- MAGIC <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:20px;margin:20px 0;">
+-- MAGIC   <div style="background:#F9F7F4;border:1px solid #DCE0E2;border-radius:16px;box-shadow:0 2px 8px rgba(27,49,57,0.06);overflow:hidden;">
+-- MAGIC     <div style="height:8px;background:#FF5F46;"></div>
+-- MAGIC     <div style="padding:20px 22px;">
+-- MAGIC       <div style="font-size:24px;font-weight:700;line-height:1.2;color:#1B3139;margin-bottom:14px;">USAGE</div>
+-- MAGIC       <div style="font-size:15px;line-height:1.6;color:#303F47;margin-bottom:14px;">
+-- MAGIC       Required to access objects inside the schema (similar to the <code>USE SCHEMA</code> privilege in Unity Catalog).
+-- MAGIC       </div>
+-- MAGIC     </div>
+-- MAGIC   </div>
+-- MAGIC   <div style="background:#F9F7F4;border:1px solid #DCE0E2;border-radius:16px;box-shadow:0 2px 8px rgba(27,49,57,0.06);overflow:hidden;">
+-- MAGIC     <div style="height:8px;background:#2272B4;"></div>
+-- MAGIC     <div style="padding:20px 22px;">
+-- MAGIC       <div style="font-size:24px;font-weight:700;line-height:1.2;color:#1B3139;margin-bottom:14px;">CREATE</div>
+-- MAGIC       <div style="font-size:15px;line-height:1.6;color:#303F47;margin-bottom:14px;">
+-- MAGIC         Permits the grantee to create objects (like tables) inside the schema.
+-- MAGIC       </div>
+-- MAGIC     </div>
+-- MAGIC   </div>
+-- MAGIC </div>
+-- MAGIC
+-- MAGIC <div style="
+-- MAGIC   border-left: 4px solid #1976d2;
+-- MAGIC   background: #e3f2fd;
+-- MAGIC   padding: 14px 18px;
+-- MAGIC   border-radius: 8px;
+-- MAGIC   margin: 16px 0;
+-- MAGIC ">
+-- MAGIC   <strong style="display:block; color:#0d47a1; margin-bottom:6px; font-size: 1.1em;">
+-- MAGIC     Reminder
+-- MAGIC   </strong>
+-- MAGIC   <div style="color:#333;">
+-- MAGIC   If your app creates its own schema, you don’t have to worry about these permissions because your app will automatically have them through ownership.
+-- MAGIC   </div>
+-- MAGIC </div>
+
+-- COMMAND ----------
+
+-- DBTITLE 1,Cell 15
+-- MAGIC %md-sandbox
+-- MAGIC ### C3. Tables and Views
+-- MAGIC
+-- MAGIC Your app will likely be working with tables/views often. Their privilege set includes:
+-- MAGIC
+-- MAGIC <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;margin:20px 0;">
+-- MAGIC   <div style="background:#F9F7F4;border:1px solid #DCE0E2;border-radius:16px;box-shadow:0 2px 8px rgba(27,49,57,0.06);overflow:hidden;">
+-- MAGIC     <div style="height:8px;background:#FF5F46;"></div>
+-- MAGIC     <div style="padding:20px 22px;">
+-- MAGIC       <div style="font-size:24px;font-weight:700;line-height:1.2;color:#1B3139;margin-bottom:14px;"><code>SELECT</code></div>
+-- MAGIC       <div style="font-size:15px;line-height:1.6;color:#303F47;margin-bottom:14px;">
+-- MAGIC       Allows the grantee to read the object.
+-- MAGIC       </div>
+-- MAGIC     </div>
+-- MAGIC   </div>
+-- MAGIC   <div style="background:#F9F7F4;border:1px solid #DCE0E2;border-radius:16px;box-shadow:0 2px 8px rgba(27,49,57,0.06);overflow:hidden;">
+-- MAGIC     <div style="height:8px;background:#2272B4;"></div>
+-- MAGIC     <div style="padding:20px 22px;">
+-- MAGIC       <div style="font-size:24px;font-weight:700;line-height:1.2;color:#1B3139;margin-bottom:14px;"><code>INSERT</code>/<code>UPDATE</code></div>
+-- MAGIC       <div style="font-size:15px;line-height:1.6;color:#303F47;margin-bottom:14px;">
+-- MAGIC         Allows the grantee to update object data (does not apply to views):
+-- MAGIC         <ul>
+-- MAGIC           <li><code>INSERT</code>: add new rows</li>
+-- MAGIC           <li><code>UPDATE</code>: update existing rows</li>
+-- MAGIC         </ul>
+-- MAGIC       </div>
+-- MAGIC     </div>
+-- MAGIC   </div>
+-- MAGIC   <div style="background:#F9F7F4;border:1px solid #DCE0E2;border-radius:16px;box-shadow:0 2px 8px rgba(27,49,57,0.06);overflow:hidden;">
+-- MAGIC     <div style="height:8px;background:#FFAB00;"></div>
+-- MAGIC     <div style="padding:20px 22px;">
+-- MAGIC       <div style="font-size:24px;font-weight:700;line-height:1.2;color:#1B3139;margin-bottom:14px;"><code>DELETE</code>/<code>TRUNCATE</code></div>
+-- MAGIC       <div style="font-size:15px;line-height:1.6;color:#303F47;margin-bottom:14px;">
+-- MAGIC         Allows the grantee to delete object data (does not apply to views):
+-- MAGIC         <ul>
+-- MAGIC           <li><code>DELETE</code>: delete rows</li>
+-- MAGIC           <li><code>TRUNCATE</code>: delete all rows</li>
+-- MAGIC         </ul>
+-- MAGIC       </div>
+-- MAGIC     </div>
+-- MAGIC   </div>
+-- MAGIC </div>
+-- MAGIC
+-- MAGIC <div style="
+-- MAGIC   border-left: 4px solid #1976d2;
+-- MAGIC   background: #e3f2fd;
+-- MAGIC   padding: 14px 18px;
+-- MAGIC   border-radius: 8px;
+-- MAGIC   margin: 16px 0;
+-- MAGIC ">
+-- MAGIC   <strong style="display:block; color:#0d47a1; margin-bottom:6px; font-size: 1.1em;">
+-- MAGIC     Note
+-- MAGIC   </strong>
+-- MAGIC   <div style="color:#333;">
+-- MAGIC   You must own an object (or be a database administrator) in order to do the following:
+-- MAGIC   <ul>
+-- MAGIC     <li>Drop table/view</li>
+-- MAGIC     <li>Modify the object itself (using <code>ALTER</code>)</li>
+-- MAGIC     <li>Modify permissions (using <code>GRANT</code> and <code>REVOKE</code>)</li>
+-- MAGIC   </ul>
+-- MAGIC   </div>
+-- MAGIC </div>
+
+-- COMMAND ----------
+
+-- MAGIC %md-sandbox
+-- MAGIC ### C4. Functions and Procedures
+-- MAGIC
+-- MAGIC Functions/procedures have a very simple privilege set.
+-- MAGIC
+-- MAGIC <div style="max-width:420px;margin:20px 0;">
+-- MAGIC   <div style="background:#F9F7F4;border:1px solid #DCE0E2;border-radius:16px;box-shadow:0 2px 8px rgba(27,49,57,0.06);overflow:hidden;">
+-- MAGIC     <div style="height:8px;background:#00A972;"></div>
+-- MAGIC     <div style="padding:20px 22px;">
+-- MAGIC       <div style="font-size:24px;font-weight:700;line-height:1.2;color:#1B3139;margin-bottom:14px;">EXECUTE</div>
+-- MAGIC       <div style="font-size:15px;line-height:1.6;color:#303F47;margin-bottom:14px;">
+-- MAGIC         Allows the grantee to invoke the function or procedure.
+-- MAGIC       </div>
+-- MAGIC     </div>
+-- MAGIC   </div>
+-- MAGIC </div>
+
+-- COMMAND ----------
+
+-- DBTITLE 1,Cell 17
+-- MAGIC %md-sandbox
+-- MAGIC ### C5. Privilege Recap
+-- MAGIC
+-- MAGIC Below, please find a visual to help determine the privileges an app will need in various scenarios. These scenarios can be classified by the answers to two key questions:
+-- MAGIC 1. Will your app create its own schema to operate in, or will it be handed a schema that already exists? And, if the latter:
+-- MAGIC 1. Will your app be operating on tables that already exist? Or will it be creating its own tables?
+-- MAGIC
+-- MAGIC At a minimum, your app’s role requires the following database permissions:
+-- MAGIC - `CONNECT` (to do anything at all)
+-- MAGIC - `CREATE` if your app will be creating its own schemas. And if your app creates its own schemas, no further permissions are necessary since it will have all the privileges it needs through the ownership of the schemas it creates. 
+-- MAGIC
+-- MAGIC If your app needs to access an existing schema, it needs:
+-- MAGIC - `USAGE` to access objects within that schema
+-- MAGIC - `CREATE` if it will create objects within the schema
+-- MAGIC
+-- MAGIC If your app needs to access tables, it needs:
+-- MAGIC - `SELECT` on each table it needs to read
+-- MAGIC - `INSERT` and/or `UPDATE` on each table it needs to update
+-- MAGIC - `DELETE` and/or `TRUNCATE` on each table it needs to delete from
+-- MAGIC
+-- MAGIC If your app calls functions or procedures directly, then it needs `EXECUTE` on those.
+-- MAGIC
+-- MAGIC <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 60 1100 460"
+-- MAGIC      font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+-- MAGIC   <defs>
+-- MAGIC     <marker id="arr-purple" viewBox="0 0 10 10" refX="9" refY="5"
+-- MAGIC             markerWidth="7" markerHeight="7" orient="auto">
+-- MAGIC       <path d="M0,0 L10,5 L0,10 z" fill="#7E5BB5"/>
+-- MAGIC     </marker>
+-- MAGIC   </defs>
+-- MAGIC   <style>
+-- MAGIC     .doc-title    { font-size: 13px; font-weight: 800; letter-spacing: 1.5px; fill: #1B3139; }
+-- MAGIC     .sub-em       { font-size: 11px; font-weight: 600; fill: #5A6F77; }
+-- MAGIC     .sg-lbl       { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; fill: #5A6F77; }
+-- MAGIC     .priv-big     { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 800; font-size: 17px; fill: #1B3139; letter-spacing: 0.5px; }
+-- MAGIC     .priv-mid     { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 700; font-size: 14px; fill: #1B3139; letter-spacing: 0.5px; }
+-- MAGIC     .priv-sub     { font-size: 11px; font-style: italic; fill: #5A6F77; }
+-- MAGIC     .edge-lbl-pur { font-size: 10px; font-weight: 800; letter-spacing: 0.6px; fill: #5A2B95; }
+-- MAGIC     .pin          { font-size: 9px; font-weight: 800; letter-spacing: 0.8px; fill: #FFFFFF; }
+-- MAGIC   </style>
+-- MAGIC   <rect width="1100" height="580" fill="#FFFFFF"/>
+-- MAGIC   <!-- =========================================================== -->
+-- MAGIC   <!-- DATABASE subgraph                                             -->
+-- MAGIC   <!-- =========================================================== -->
+-- MAGIC   <rect x="40" y="80" width="320" height="360" rx="10"
+-- MAGIC         fill="#FAFAFA" stroke="#A8A8A8" stroke-dasharray="4 4"/>
+-- MAGIC   <text x="200" y="104" text-anchor="middle" class="sg-lbl">DATABASE</text>
+-- MAGIC   <!-- CONNECT (gateway) -->
+-- MAGIC   <rect x="80" y="135" width="240" height="100" rx="10"
+-- MAGIC         fill="#FFF4F2" stroke="#FF5F46" stroke-width="1.4"/>
+-- MAGIC   <rect x="120" y="125" width="80" height="20" rx="10" fill="#FF3621"/>
+-- MAGIC   <text x="160" y="139" text-anchor="middle" class="pin">GATEWAY</text>
+-- MAGIC   <text x="200" y="180" text-anchor="middle" class="priv-big">CONNECT</text>
+-- MAGIC   <text x="200" y="206" text-anchor="middle" class="priv-sub">required to open a session on the database</text>
+-- MAGIC   <!-- DATABASE.CREATE (extend) -->
+-- MAGIC   <rect x="80" y="315" width="240" height="100" rx="10"
+-- MAGIC         fill="#EAE3F5" stroke="#B5A4D4" stroke-width="1.4"/>
+-- MAGIC   <rect x="120" y="305" width="80" height="20" rx="10" fill="#7E5BB5"/>
+-- MAGIC   <text x="160" y="319" text-anchor="middle" class="pin">EXTEND</text>
+-- MAGIC   <text x="200" y="360" text-anchor="middle" class="priv-big">CREATE</text>
+-- MAGIC   <text x="200" y="386" text-anchor="middle" class="priv-sub">create new schemas in this database</text>
+-- MAGIC   <!-- =========================================================== -->
+-- MAGIC   <!-- SCHEMA subgraph                                               -->
+-- MAGIC   <!-- =========================================================== -->
+-- MAGIC   <rect x="390" y="80" width="320" height="360" rx="10"
+-- MAGIC         fill="#FAFAFA" stroke="#A8A8A8" stroke-dasharray="4 4"/>
+-- MAGIC   <text x="550" y="104" text-anchor="middle" class="sg-lbl">SCHEMA</text>
+-- MAGIC   <!-- USAGE (gateway) -->
+-- MAGIC   <rect x="430" y="135" width="240" height="100" rx="10"
+-- MAGIC         fill="#FFF4F2" stroke="#FF5F46" stroke-width="1.4"/>
+-- MAGIC   <rect x="470" y="125" width="80" height="20" rx="10" fill="#FF3621"/>
+-- MAGIC   <text x="510" y="139" text-anchor="middle" class="pin">GATEWAY</text>
+-- MAGIC   <text x="550" y="180" text-anchor="middle" class="priv-big">USAGE</text>
+-- MAGIC   <text x="550" y="206" text-anchor="middle" class="priv-sub">required to touch any object in the schema</text>
+-- MAGIC   <!-- SCHEMA.CREATE (extend) -->
+-- MAGIC   <rect x="430" y="315" width="240" height="100" rx="10"
+-- MAGIC         fill="#EAE3F5" stroke="#B5A4D4" stroke-width="1.4"/>
+-- MAGIC   <rect x="470" y="305" width="80" height="20" rx="10" fill="#7E5BB5"/>
+-- MAGIC   <text x="510" y="319" text-anchor="middle" class="pin">EXTEND</text>
+-- MAGIC   <text x="550" y="360" text-anchor="middle" class="priv-big">CREATE</text>
+-- MAGIC   <text x="550" y="386" text-anchor="middle" class="priv-sub">create new tables (and other objects)</text>
+-- MAGIC   <!-- =========================================================== -->
+-- MAGIC   <!-- TABLE subgraph                                                -->
+-- MAGIC   <!-- =========================================================== -->
+-- MAGIC   <rect x="740" y="80" width="320" height="360" rx="10"
+-- MAGIC         fill="#FAFAFA" stroke="#A8A8A8" stroke-dasharray="4 4"/>
+-- MAGIC   <text x="900" y="104" text-anchor="middle" class="sg-lbl">TABLE</text>
+-- MAGIC   <!-- SELECT -->
+-- MAGIC   <rect x="775" y="135" width="250" height="85" rx="8"
+-- MAGIC         fill="#FFF4F2" stroke="#FF5F46" stroke-width="1.4"/>
+-- MAGIC   <text x="900" y="170" text-anchor="middle" class="priv-mid">SELECT</text>
+-- MAGIC   <text x="900" y="192" text-anchor="middle" class="priv-sub">read rows</text>
+-- MAGIC   <!-- INSERT · UPDATE -->
+-- MAGIC   <rect x="775" y="240" width="250" height="85" rx="8"
+-- MAGIC         fill="#FFF4F2" stroke="#FF5F46" stroke-width="1.4"/>
+-- MAGIC   <text x="900" y="275" text-anchor="middle" class="priv-mid">INSERT · UPDATE</text>
+-- MAGIC   <text x="900" y="297" text-anchor="middle" class="priv-sub">add or change rows</text>
+-- MAGIC   <!-- DELETE · TRUNCATE -->
+-- MAGIC   <rect x="775" y="345" width="250" height="85" rx="8"
+-- MAGIC         fill="#FFF4F2" stroke="#FF5F46" stroke-width="1.4"/>
+-- MAGIC   <text x="900" y="380" text-anchor="middle" class="priv-mid">DELETE · TRUNCATE</text>
+-- MAGIC   <text x="900" y="402" text-anchor="middle" class="priv-sub">remove rows</text>
+-- MAGIC   <!-- =========================================================== -->
+-- MAGIC   <!-- CREATES arrows — labels above and below, arrow unobstructed   -->
+-- MAGIC   <!-- =========================================================== -->
+-- MAGIC   <!-- DB.CREATE → Schema -->
+-- MAGIC   <line x1="320" y1="365" x2="390" y2="365" stroke="#7E5BB5" stroke-width="2.4"
+-- MAGIC         stroke-dasharray="6 4" marker-end="url(#arr-purple)"/>
+-- MAGIC   <text x="355" y="349" text-anchor="middle" class="edge-lbl-pur">CREATES</text>
+-- MAGIC   <text x="355" y="388" text-anchor="middle" class="priv-sub">new schemas</text>
+-- MAGIC   <!-- Schema.CREATE → Table -->
+-- MAGIC   <line x1="670" y1="365" x2="740" y2="365" stroke="#7E5BB5" stroke-width="2.4"
+-- MAGIC         stroke-dasharray="6 4" marker-end="url(#arr-purple)"/>
+-- MAGIC   <text x="705" y="349" text-anchor="middle" class="edge-lbl-pur">CREATES</text>
+-- MAGIC   <text x="705" y="388" text-anchor="middle" class="priv-sub">new tables</text>
+-- MAGIC </svg>
+-- MAGIC
+-- MAGIC <div style="
+-- MAGIC   border-left: 4px solid #1976d2;
+-- MAGIC   background: #e3f2fd;
+-- MAGIC   padding: 14px 18px;
+-- MAGIC   border-radius: 8px;
+-- MAGIC   margin: 16px 0;
+-- MAGIC ">
+-- MAGIC   <strong style="display:block; color:#0d47a1; margin-bottom:6px; font-size: 1.1em;">
+-- MAGIC     Reminder
+-- MAGIC   </strong>
+-- MAGIC   <div style="color:#333;">
+-- MAGIC      Acting on any object also requires the gateway privileges of all the levels above it. For example, to <code>SELECT</code> rows from a table also requires <code>CONNECT</code> on the database and <code>USAGE</code> on the schema.
+-- MAGIC   </div>
+-- MAGIC </div>
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## D. Conclusion
+-- MAGIC
+-- MAGIC In this lesson, we covered the foundational Postgres concepts you need to build and operate Lakebase applications effectively:
+-- MAGIC
+-- MAGIC - **Roles** are the unified identity model in Postgres, combining the concepts of users and groups. Every database action is performed as a role, and ownership of an object implicitly grants full control over it.
+-- MAGIC - **Databases** are top-level, isolated namespaces. Clients connect to a specific database, and objects in different databases are not accessible within the same connection.
+-- MAGIC - **Schemas** organize objects — tables, views, and functions — into logical namespaces within a database. Postgres includes several system schemas (pg_catalog, information_schema, pg_temp) alongside the default public user schema.
+-- MAGIC - **Object references** in Postgres use a two-level namespace (schema + object). Unqualified references are resolved using the search path, making fully-qualified names the safest choice when precision matters.
+-- MAGIC - **Privileges** follow an ACL model scoped to each object level: `CONNECT`/`CREATE` on databases, `USAGE`/`CREATE` on schemas, and `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE` on tables. Ownership bypasses the need for explicit grants.
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC &copy; 2026 Databricks, Inc. All rights reserved. Apache, Apache Spark, Spark, the Spark Logo, Apache Iceberg, Iceberg, and the Apache Iceberg logo are trademarks of the <a href="https://www.apache.org/" target="_blank">Apache Software Foundation</a>.<br/><br/><a href="https://databricks.com/privacy-policy" target="_blank">Privacy Policy</a> | <a href="https://databricks.com/terms-of-use" target="_blank">Terms of Use</a> | <a href="https://help.databricks.com/" target="_blank">Support</a>
